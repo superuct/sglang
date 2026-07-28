@@ -32,7 +32,6 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 1
-          submodules: 'recursive'
 
       - name: Set up Python
         uses: actions/setup-python@v5
