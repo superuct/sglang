@@ -50,6 +50,19 @@ def record_weight_version_events(reqs: Iterable[Req], old_version: str) -> int:
     return num_recorded
 
 
+def truncate_weight_version_events(
+    events: List[WeightVersionEvent], num_kept_tokens: int
+) -> List[WeightVersionEvent]:
+    truncated = [
+        WeightVersionEvent(
+            old_version=event.old_version,
+            num_output_tokens=min(event.num_output_tokens, num_kept_tokens),
+        )
+        for event in events
+    ]
+    return [event for event in truncated if event.num_output_tokens > 0]
+
+
 def compute_weight_version_spans(
     events: List[WeightVersionEvent],
     current_version: str,

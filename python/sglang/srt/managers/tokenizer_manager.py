@@ -138,7 +138,10 @@ from sglang.srt.utils.hf_transformers_utils import (
 from sglang.srt.utils.network import get_zmq_socket
 from sglang.srt.utils.request_logger import RequestLogger
 from sglang.srt.utils.watchdog import Watchdog
-from sglang.srt.utils.weight_versions import add_weight_versions_to_meta_info
+from sglang.srt.utils.weight_versions import (
+    add_weight_versions_to_meta_info,
+    compute_weight_version_spans,
+)
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -1390,6 +1393,11 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             AbortReq(
                 rid=tokenized_obj.rid,
                 abort_message="Aborted by AbortReq before dispatch to scheduler",
+                weight_versions=compute_weight_version_spans(
+                    [],
+                    current_version=self.server_args.weight_version,
+                    num_output_tokens=0,
+                ),
             )
         )
         return True

@@ -8,6 +8,7 @@ from sglang.srt.managers.scheduler import Scheduler, _make_abort_req
 from sglang.srt.managers.scheduler_components.weight_updater import (
     SchedulerWeightUpdaterManager,
 )
+from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.utils.weight_versions import (
     WeightVersionEvent,
     WeightVersionSpan,
@@ -15,6 +16,7 @@ from sglang.srt.utils.weight_versions import (
     build_endpoint_weight_version_metadata,
     compute_weight_version_spans,
     record_weight_version_events,
+    truncate_weight_version_events,
 )
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
@@ -272,7 +274,14 @@ class _SchedulerStub:
     collect_inflight_reqs = Scheduler.collect_inflight_reqs
 
     def __init__(
-        self, version, running, waiting, chunked=None, last_batch=None, pp_size=1
+        self,
+        version,
+        running,
+        waiting,
+        chunked=None,
+        last_batch=None,
+        pp_size=1,
+        hisparse=None,
     ):
         self.server_args = _ServerArgsStub(version)
         self.ps = SimpleNamespace(pp_size=pp_size)
@@ -280,6 +289,7 @@ class _SchedulerStub:
         self.last_batch = last_batch
         self.waiting_queue = waiting
         self.chunked_req = chunked
+        self.hisparse_coordinator = hisparse
 
 
 class TestSchedulerRecordWeightVersionChange(CustomTestCase):
@@ -340,6 +350,20 @@ class TestSchedulerRecordWeightVersionChange(CustomTestCase):
         for req in (mb0_req, mb1_req, pending_req):
             self.assertEqual(len(req.weight_version_events), 1)
 
+    def test_records_on_hisparse_staging_requests(self):
+        """Requests parked in the HiSparse staging queue are swept like any live request."""
+        staging_req = _ReqStub(2)
+        coordinator = SimpleNamespace(
+            ack_staging_queue=[SimpleNamespace(req=staging_req)]
+        )
+        scheduler = self._scheduler("v1", [], [], hisparse=coordinator)
+
+        Scheduler.record_weight_version_change(scheduler, new_version="v2")
+
+        self.assertEqual(len(staging_req.weight_version_events), 1)
+        self.assertEqual(staging_req.weight_version_events[0].old_version, "v1")
+        self.assertEqual(staging_req.weight_version_events[0].num_output_tokens, 2)
+
     def test_same_version_is_a_noop(self):
         """Re-announcing the current version must not record events."""
         req = _ReqStub(3)
@@ -376,6 +400,85 @@ class TestRecordWeightVersionEvents(CustomTestCase):
         self.assertEqual(len(started_req.weight_version_events), 1)
         self.assertEqual(started_req.weight_version_events[0].old_version, "v1")
         self.assertEqual(started_req.weight_version_events[0].num_output_tokens, 4)
+
+
+class TestTruncateWeightVersionEvents(CustomTestCase):
+    def test_events_within_the_kept_prefix_are_preserved(self):
+        """Events entirely inside the streamed prefix survive a retract untouched."""
+        events = [WeightVersionEvent(old_version="v1", num_output_tokens=3)]
+        self.assertEqual(
+            truncate_weight_version_events(events, num_kept_tokens=5), events
+        )
+
+    def test_events_beyond_the_kept_prefix_are_clamped(self):
+        """An event past the streamed prefix is clamped so re-generated tokens forget it."""
+        events = [
+            WeightVersionEvent(old_version="v1", num_output_tokens=3),
+            WeightVersionEvent(old_version="v2", num_output_tokens=9),
+        ]
+        self.assertEqual(
+            truncate_weight_version_events(events, num_kept_tokens=5),
+            [
+                WeightVersionEvent(old_version="v1", num_output_tokens=3),
+                WeightVersionEvent(old_version="v2", num_output_tokens=5),
+            ],
+        )
+
+    def test_zero_kept_tokens_drops_all_events(self):
+        """With nothing streamed yet the whole history is discarded, as before the fix."""
+        events = [WeightVersionEvent(old_version="v1", num_output_tokens=3)]
+        self.assertEqual(truncate_weight_version_events(events, num_kept_tokens=0), [])
+
+
+class TestSpanlessAbortPaths(CustomTestCase):
+    def test_priority_disabled_rejection_attaches_spans(self):
+        """The pre-scheduler priority rejection reports spans like every other abort."""
+        req = _ReqStub(0)
+        req.rid = "r0"
+        req.priority = 5
+        req.time_stats = SimpleNamespace(
+            trace_ctx=SimpleNamespace(abort=lambda abort_info: None)
+        )
+        sent = []
+        scheduler = SimpleNamespace(
+            enable_priority_scheduling=False,
+            abort_on_priority_when_disabled=True,
+            ipc_channels=SimpleNamespace(
+                send_to_tokenizer=SimpleNamespace(
+                    send_output=lambda obj, req_arg: sent.append(obj)
+                )
+            ),
+        )
+
+        with patch(
+            "sglang.srt.managers.scheduler.get_server_args",
+            return_value=SimpleNamespace(weight_version="v1"),
+        ):
+            accepted = Scheduler._set_or_validate_priority(scheduler, req)
+
+        self.assertFalse(accepted)
+        self.assertEqual(
+            sent[0].weight_versions, [WeightVersionSpan(version="v1", start=0, end=0)]
+        )
+
+    def test_pre_dispatch_abort_attaches_spans(self):
+        """A tokenizer-held request aborted before dispatch still reports a span."""
+        captured = []
+        manager = SimpleNamespace(
+            rid_to_state={"r0": SimpleNamespace(abort_before_dispatch=True)},
+            server_args=SimpleNamespace(weight_version="v1"),
+            _handle_abort_req=lambda abort_req: captured.append(abort_req),
+        )
+
+        handled = TokenizerManager._abort_instead_of_dispatch(
+            manager, SimpleNamespace(rid="r0")
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            captured[0].weight_versions,
+            [WeightVersionSpan(version="v1", start=0, end=0)],
+        )
 
 
 class TestMakeAbortReq(CustomTestCase):
