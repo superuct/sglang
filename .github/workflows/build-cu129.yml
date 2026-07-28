@@ -15,7 +15,7 @@ on:
       ref:
         description: 'sglang ref (tag / branch / commit)'
         required: true
-        default: 'v0.4.5'
+        default: 'v0.5.16'
       version_label:
         description: 'local version 标签 (不带 +)'
         required: false
@@ -46,8 +46,8 @@ jobs:
             -e 's|humming-kernels\[cu13\]|humming-kernels[cu12]|g' \
             -e 's|nvidia-cutlass-dsl\[cu13\]|nvidia-cutlass-dsl[cu12]|g' \
             -e 's|cuda-python>=13\.0|cuda-python>=12.0|g' \
-            -e 's|"sgl-deep-gemm==0\.1\.5"|"sgl-deep-gemm>=0.1.5"|g' \
-            -e 's|"sglang-kernel==0\.4\.5"|"sglang-kernel>=0.4.5"|g' \
+            -e 's|"sgl-deep-gemm==[^"]*"|"sgl-deep-gemm>=0.0"|g' \
+            -e 's|"sglang-kernel==[^"]*"|"sglang-kernel>=0.0"|g' \
             pyproject.toml
 
           echo '==== patched deps ===='
