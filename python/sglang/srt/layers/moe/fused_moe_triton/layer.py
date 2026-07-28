@@ -109,7 +109,7 @@ def _make_loaded_weight_compact(loaded_weight: torch.Tensor) -> torch.Tensor:
 
 
 def _maybe_compact_loaded_weight(loaded_weight: torch.Tensor) -> torch.Tensor:
-    if not envs.SGLANG_MOE_COMPACT_WEIGHT_LOAD.get():
+    if not envs.SGLANG_MOE_COPY_WEIGHT_VIEWS_BEFORE_H2D.get():
         return loaded_weight
     return _make_loaded_weight_compact(loaded_weight)
 
