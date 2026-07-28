@@ -137,20 +137,6 @@ jobs:
           printf 'version=%s\n' "$V" >> "$GITHUB_OUTPUT"
           echo "Resolved version: $V"
 
-      - name: Delete all old releases
-        if: steps.check.outputs.skip != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "Existing releases before cleanup:"
-          gh release list -R "$GITHUB_REPOSITORY" --limit 100 || true
-          for tag in $(gh release list -R "$GITHUB_REPOSITORY" --limit 100 --json tagName --jq '.[].tagName'); do
-            echo "Deleting release: $tag"
-            gh release delete "$tag" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>&1 || true
-          done
-          echo "Releases after cleanup:"
-          gh release list -R "$GITHUB_REPOSITORY" --limit 100 || true
-
       - name: Create GitHub Release
         if: steps.check.outputs.skip != 'true'
         uses: softprops/action-gh-release@v2
