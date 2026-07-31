@@ -4,7 +4,7 @@ name: Build cu129 wheel
 # - schedule: 每天 06:17 UTC 检查上游最新 stable tag
 # - workflow_dispatch: 手动触发，可指定 ref
 # 触发后: checkout 上游 → patch cu13→cu12 → 装 protoc → 构建 wheel →
-#         删除 fork 里所有老 Release → 创建新 Release
+#         创建对应版本的 Release（保留历史版本）
 
 on:
   schedule:
@@ -99,6 +99,13 @@ jobs:
           echo '==== patched deps ===='
           grep -E 'flashinfer|humming|cutlass-dsl|cuda-python|sgl-deep-gemm|sglang-kernel' pyproject.toml | head -10
 
+          # Upstream dependency names can change between releases. Do not publish a
+          # cu129-labelled wheel if the resulting metadata still requires CUDA 13.
+          if grep -Eni 'cu13|cuda[-_ ]?python[^"[:space:]]*[<>=!~ ]+13' pyproject.toml; then
+            echo 'CUDA 13 dependency constraint remains after cu129 patching'
+            exit 1
+          fi
+
       - name: Install protoc (for rust/sglang-grpc)
         if: steps.check.outputs.skip != 'true'
         run: sudo bash scripts/ci/utils/install_protoc.sh
@@ -158,7 +165,6 @@ jobs:
 
             # Install this sglang wheel (pip resolves remaining deps from PyPI):
             pip install \
-                --index-strategy unsafe-best-match \
                 --extra-index-url https://download.pytorch.org/whl/cu129 \
                 --extra-index-url https://docs.sglang.ai/whl/cu129 \
                 sglang-${{ steps.ver.outputs.version }}-*.whl
