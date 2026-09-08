@@ -1,0 +1,91 @@
+name: Build cu129 MHC fix test wheel
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build-mhcfix-wheel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SOURCE_SHA: 2d773d07f1ce89a98965269e2ca0b5c73d37e073
+      SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG: 0.5.19.post1+cu129.mhcfix.g2d773d07
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: superuct/sglang
+          ref: 2d773d07f1ce89a98965269e2ca0b5c73d37e073
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify source and run regression tests
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          python test/registered/unit/layers/test_deep_gemm_hc_prenorm_import.py
+      - name: Patch CUDA dependencies
+        working-directory: python
+        run: |
+          sed -i \
+            -e 's|flashinfer_python\[cu13\]|flashinfer_python[cu12]|g' \
+            -e 's|humming-kernels\[cu13\]|humming-kernels[cu12]|g' \
+            -e 's|nvidia-cutlass-dsl\[cu13\]==|nvidia-cutlass-dsl==|g' \
+            -e 's|cuda-python>=13\.0|cuda-python>=12.0|g' \
+            -e 's|"sgl-deep-gemm==[^"]*"|"sgl-deep-gemm>=0.0"|g' \
+            -e 's|"sglang-kernel==[^"]*"|"sglang-kernel>=0.0"|g' \
+            pyproject.toml
+          if grep -Eni 'cu13|cuda[-_ ]?python[^"[:space:]]*[<>=!~ ]+13' pyproject.toml; then
+            echo 'CUDA 13 dependency constraint remains'
+            exit 1
+          fi
+      - name: Install protoc
+        run: sudo bash scripts/ci/utils/install_protoc.sh
+      - name: Build wheel with consistent package metadata
+        working-directory: python
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build wheel setuptools setuptools-scm
+          python -m build --wheel
+      - name: Verify wheel contents and metadata
+        run: |
+          python - <<'PY'
+          import ast, email, os, pathlib, zipfile
+          wheels = list(pathlib.Path('python/dist').glob('sglang-*.whl'))
+          assert len(wheels) == 1, wheels
+          wheel = wheels[0]
+          expected = os.environ['SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG']
+          assert wheel.name.startswith(f'sglang-{expected}-'), wheel
+          with zipfile.ZipFile(wheel) as z:
+              metadata = email.message_from_bytes(z.read(next(n for n in z.namelist() if n.endswith('.dist-info/METADATA'))))
+              assert metadata['Version'] == expected, metadata['Version']
+              assert not any('cu13' in r.lower() for r in metadata.get_all('Requires-Dist', []))
+              src = z.read('sglang/srt/layers/deep_gemm_wrapper/entrypoint.py').decode()
+              fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == 'tf32_hc_prenorm_gemm')
+              assert any(isinstance(n, ast.Import) and any(a.name == 'deep_gemm' for a in n.names) for n in fn.body)
+              assert expected in z.read('sglang/_version.py').decode()
+          print('Verified:', wheel.name, 'source:', os.environ['SOURCE_SHA'])
+          PY
+          cd python/dist
+          sha256sum *.whl > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sglang-cu129-mhcfix
+          path: |
+            python/dist/*.whl
+            python/dist/SHA256SUMS
+          if-no-files-found: error
+      - name: Publish isolated test prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="sglang-v${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG}"
+          cat > /tmp/notes.md <<EOF
+          Test wheel for https://github.com/sgl-project/sglang/pull/38442.
+
+          Source: superuct/sglang commit ${SOURCE_SHA} (PR based on upstream main, not an unmodified v0.5.19 release).
+          Test package version: ${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG}.
+          Python 3.12, Linux x86_64; CUDA dependency patches follow build-cu129.yml.
+          DeepGEMM and sglang-kernel are not rebuilt; preinstall compatible cu129 wheels.
+          CPU regression tests and wheel metadata/source checks passed. Full-model GPU validation has not been run.
+          EOF
+          gh release create "$TAG" python/dist/*.whl python/dist/SHA256SUMS --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --title "SGLang cu129 MHC import fix test" --notes-file /tmp/notes.md --prerelease --latest=false
