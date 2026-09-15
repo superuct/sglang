@@ -355,6 +355,7 @@ class PrefillInputBuffers(ForwardInputBuffers):
         hidden_size: int,
         dtype: torch.dtype,
         enable_mamba_track: bool,
+        enable_input_embeds: Optional[bool] = None,
     ) -> PrefillInputBuffers:
         with torch.device(device):
             input_ids = torch.zeros((max_num_tokens,), dtype=torch.int64)
@@ -375,12 +376,18 @@ class PrefillInputBuffers(ForwardInputBuffers):
             )
             positions = torch.zeros((max_num_tokens,), dtype=torch.int64)
 
-            if is_multimodal:
-                input_embeds = torch.zeros((max_num_tokens, hidden_size), dtype=dtype)
-                mrope_positions = torch.zeros((3, max_num_tokens), dtype=torch.int64)
-            else:
-                input_embeds = None
-                mrope_positions = None
+            if enable_input_embeds is None:
+                enable_input_embeds = is_multimodal
+            input_embeds = (
+                torch.zeros((max_num_tokens, hidden_size), dtype=dtype)
+                if enable_input_embeds
+                else None
+            )
+            mrope_positions = (
+                torch.zeros((3, max_num_tokens), dtype=torch.int64)
+                if is_multimodal
+                else None
+            )
 
         return cls(
             input_ids=input_ids,

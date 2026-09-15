@@ -251,6 +251,8 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
     buffer population, attention metadata init, and output slicing.
     """
 
+    _use_draft_input_embeds = False
+
     def __init__(self, model_runner: ModelRunner):
         super().__init__(model_runner)
         # --- model flags ----------------------------------------------
@@ -286,6 +288,12 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             self.prefill_backend_name == Backend.BREAKABLE
             and model_runner.spec_algorithm.is_eagle()
         )
+        # PR #38330: keep multimodal pad IDs out of captured embedding lookups.
+        self._use_draft_input_embeds = (
+            is_breakable_eagle
+            and model_runner.is_draft_worker
+            and model_runner.spec_algorithm.is_eagle3()
+        )
         if is_breakable_eagle and model_runner.is_draft_worker:
             self.capture_hidden_mode = CaptureHiddenMode.LAST
         elif is_breakable_eagle or model_runner.spec_algorithm.is_dflash_family():
@@ -311,6 +319,7 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             hidden_size=input_embeds_hidden_size,
             dtype=self.model_runner.dtype,
             enable_mamba_track=self.mamba_track_enabled,
+            enable_input_embeds=(self.is_multimodal or self._use_draft_input_embeds),
         )
         self.buffers.share_buffers()
         # Token-axis FB-shared slot registry adopting PrefillInputBuffers
@@ -330,6 +339,7 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             enable_prefill_cp=(
                 is_dsa_enable_prefill_cp() or is_mla_prefill_cp_enabled()
             ),
+            register_input_embeds=(self.is_multimodal or self._use_draft_input_embeds),
             source=self.buffers,
         )
 
@@ -491,9 +501,7 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
         # the contract only when the backend is Breakable; FullCG and
         # TC_PIECEWISE use the eager init_forward_metadata path.
         if isinstance(self.backend, BreakableCudaGraphBackend):
-            self.use_captured_attn_metadata = (
-                model_runner.attn_backend.use_captured_forward_metadata_for_breakable_cuda_graph
-            )
+            self.use_captured_attn_metadata = model_runner.attn_backend.use_captured_forward_metadata_for_breakable_cuda_graph
         else:
             self.use_captured_attn_metadata = False
         self.attn_metadata_buffers: Optional[Dict[int, object]] = (
@@ -573,9 +581,9 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
     def _prefill_logits_buffer_rows(self, forward_batch: ForwardBatch) -> int:
         if not forward_batch.return_logprob:
             return forward_batch.batch_size
-        assert (
-            self._uses_eager_prefill_tail()
-        ), "Prefill return_logprob requires an eager logits tail."
+        assert self._uses_eager_prefill_tail(), (
+            "Prefill return_logprob requires an eager logits tail."
+        )
 
         global_num_tokens = forward_batch.global_num_tokens_for_logprob_cpu
         if global_num_tokens is not None:
@@ -1467,6 +1475,23 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             padded_num_tokens=static_num_tokens,
         )
 
+        if self._use_draft_input_embeds:
+            draft_input_embeds = forward_batch.mm_input_embeds
+            if draft_input_embeds is not None:
+                last_indices = (
+                    forward_batch.extend_start_loc + forward_batch.extend_seq_lens - 1
+                ).long()
+                draft_input_embeds[last_indices] = self.layer_model.embed_tokens(
+                    forward_batch.input_ids[last_indices]
+                )
+            else:
+                draft_input_embeds = self.layer_model.embed_tokens(
+                    forward_batch.input_ids
+                )
+            self.buffer_registry.get_slot("input_embeds").buffer[:num_tokens].copy_(
+                draft_input_embeds
+            )
+
         registry = self.buffer_registry
 
         def _slot(name):
@@ -1689,6 +1714,9 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
         # uses real request metadata instead of padded slots. BCG has no
         # request-slot padding, so static_forward_batch is already the serving batch.
         tail_batch = forward_batch if full_path else static_forward_batch
+        model_kwargs = kwargs
+        if self._use_draft_input_embeds:
+            model_kwargs = {**kwargs, "input_embeds": static_forward_batch.input_embeds}
         try:
             with self._prefill_forward_context(
                 static_forward_batch,
@@ -1699,7 +1727,7 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
                     tail_batch.input_ids,
                     tail_batch.positions,
                     tail_batch,
-                    **kwargs,
+                    **model_kwargs,
                 )
         finally:
             self.layer_model.forward = original_layer_forward
